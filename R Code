@@ -1,0 +1,261 @@
+<<datasimulation, echo=FALSE,results='hide',error=FALSE, warning=FALSE, message=FALSE>>=
+library(knitr)
+library(tidyverse)
+library(coin)
+library(readxl)
+library(DeclareDesign)
+library(DesignLibrary)
+#import data set.
+dat1 <- read_excel("~/Desktop/2020 Fall /Quant2_Final/FinalProject_Yoo.xlsx")
+#clean data set
+drop<-c("Signature", "Ratification")
+df=dat1[,!(names(dat1)%in%drop)]
+df1 <- df %>% drop_na()
+df1$emission=log(df1$CO2)
+df1$gdp=log(df1$GDP)
+df1$CO2 <- NULL
+df1$GDP <- NULL
+#create a population based on the real data set that I imported. 
+pop <- declare_population(df1)
+assignment <- declare_assignment(assignment_variable = "political_inst")
+outcomes <-declare_potential_outcomes(time~political_inst*tau+.05*emission+.05*gdp+
+                                        rnorm(N, mean=0, sd=1), assignment_variables = "political_inst")
+treatment_outcomes <- declare_reveal(outcome_variables = "time",assignment_variables = "political_inst")
+design <-pop+assignment+outcomes+treatment_outcomes
+design1 <- redesign(design, tau=0.15)
+
+set.seed(12345)
+df2 <- draw_data(design1)
+@
+
+
+<<distribution1, echo=FALSE, fig.align='center', result='asis'>>=
+
+#plot the distribution of the simulated data
+par(mfrow=c(2,2))
+hist(df2$gdp, main="", xlab = "Gross Domestic Product (GDP)")
+hist(df2$emission, main = "", xlab = "CO2 Emission of Nation-States")
+hist(df2$political_inst, main = "", xlab = "Political Institution")
+hist(df2$time, main = "", xlab = "Duration for Ratifying the Paris Agreement")
+@
+
+
+<<linear1, echo=FALSE, fig.align='center', results='asis'>>=
+library(ggplot2)
+#show linear relationship between variables
+par(mfrow=c(3,3))
+plot(df2$time,df2$political_inst,
+     xlab= "Duration of Sign and Ratification",
+     ylab= "Political Institution",
+     )
+abline(lm(political_inst~time, data=df2), col="red", lwd=2)
+plot(df2$time, df2$emission,
+     xlab="Duration of Ratification",
+     ylab="CO2 Emission of Countries")
+abline(lm(emission~time, data=df2), col="red", lwd=2)
+plot(df2$time, df2$gdp,
+     xlab= "Duration of Ratification",
+     ylab= "GDP of Countries")
+abline(lm(gdp~time,data=df2), col="red", lwd=2)
+plot(df2$political_inst,df2$gdp,
+     xlab= "Political Institution",
+     ylab= "GDP of Countries",
+     )
+abline(lm(gdp~political_inst, data=df2), col="red", lwd=2)
+plot(df2$political_inst,df2$emission,
+     xlab= "Political Institution",
+     ylab= "CO2 Emission of Countries",
+     )
+abline(lm(emission~political_inst, data=df2), col="red", lwd=2)
+plot(df2$gdp,df2$emission,
+     xlab= "GDP of Countries",
+     ylab= "CO2 Emission of Countries",
+     )
+abline(lm(emission~gdp, data=df2), col="red", lwd=2)
+@
+
+<<bptest, echo=FALSE, results='hide', error=FALSE, warning=FALSE, message=FALSE>>=
+#check homskedasticity
+lme1 <- (lm(time~political_inst+gdp+emission, data=df2))
+library(lmtest)
+bptest(lme1)
+@
+
+
+<<residualplot, echo=FALSE,fig.align='center', results='asis'>>=
+#plog the residual plot
+plot(lm(time~political_inst+gdp+emission, data=df2), which=1)
+@
+
+
+<<propensityscore, echo=FALSE,results='hide',error=FALSE, warning=FALSE, message=FALSE>>=
+library(MASS)
+library(optmatch)
+set.seed(12345)
+#match on treatment assignment and covariates
+#calculate propensity score
+ps <- glm(political_inst~emission+gdp, data=df2, family=binomial())
+#addd the predicted propensity score to the data
+df2$psvalue <- predict(ps, type="response")
+library(MatchIt)
+#estimate near neighbor using the 1:1 ration (default)
+#match using near~neighbor
+m.nn <- matchit(political_inst~emission+gdp, data=df2, method="nearest", ratio=1)
+summary(m.nn)
+match.data=match.data(m.nn)
+
+@
+
+
+<<beforematching, echo=FALSE,results='hide',error=FALSE, warning=FALSE, message=FALSE>>=
+#showing covariate imbalance before matching
+treated <- (df2$political_inst==1)
+cov <- df2[,2:9]
+std.diff <- apply(cov, 2, function(x) 100*(mean(x[treated])-mean(x[!treated]))/(sqrt(0.5*(var(x[treated])+var(x[!treated])))))
+library(RItools)
+#balance talbe before matching
+xBalance(political_inst~emission+gdp, data=df2, report=c("chisquare.test", "p.values"))
+#balance table after matching
+xBalance(political_inst~emission+gdp, data=match.data, report=c("chisquare.test", "p.values"))
+@
+
+
+<<matchinghist, echo=FALSE,results='asis',error=FALSE, warning=FALSE, message=FALSE>>=
+
+#plot the distribution of the matching dataset.
+plot(m.nn, type="hist")
+@
+
+
+<<hmisc, echo=FALSE,results='hide', error=FALSE, warning=FALSE, message=FALSE>>=
+library(Hmisc)
+@
+
+<<comparison, echo=FALSE,results='hide',fig.align='center'>>=
+
+#plot the distribution of before and after matching to compare.
+par(mfrow=c(2,2))
+histbackback(split(df2$psvalue, df2$political_inst), main="Propensity Score Before Matching", xlab=c("control", "treatment"))
+histbackback(split(match.data$psvalue, match.data$political_inst), main="Propensity Score After Matching", xlab=c("control", "treatment"))
+@
+
+
+<<estimand, echo=FALSE,results='hide',error=FALSE, warning=FALSE, message=FALSE>>=
+set.seed(12345)
+df2 <- draw_data(design1)
+#estimating the effect of type of political institution
+make_estimands <-function(data){
+  bs <- coef(lm(time~political_inst, data=df2))
+  return(data.frame(estimand_label=c('political_inst'),
+                    estimand=bs[c('political_inst')],
+                    stringsAsFactors = FALSE))
+}
+estimand <- declare_estimands(handler = make_estimands,
+                              label = "Pop_Relationships")
+design1_plus_estimands <- design1 + estimand
+draw_estimands(design1_plus_estimands)
+#declare estimators
+estimator1 <- declare_estimator(time~political_inst+emission+gdp,
+                                model=lm,
+                                term=c('political_inst'),
+                                estimand=c('political_inst'),
+                                label="canned_lm")
+design1_lm <-design1_plus_estimands +estimator1
+design1_lm
+reg1<-lm(time~political_inst+emission+gdp, data=df2)
+@
+
+
+<<estimator, echo=FALSE,results='hide',error=FALSE, warning=FALSE, message=FALSE>>=
+#declare estimator2
+estimator2 <- declare_estimator(time~political_inst+emission+gdp,
+                                model=lm_robust,
+                                term=c('political_inst'),
+                                estimand=c('political_inst'),
+                               label="lm_robust")
+design2_robust<- design1_plus_estimands+estimator2
+design2_robust
+reg2<-rlm(time~political_inst+emission+gdp, data=df2)
+@
+
+
+<<diagnose, echo=FALSE,results='hide',error=FALSE, warning=FALSE, message=FALSE>>=
+#simulate and perform diagnose tests. 
+designtotal <- design1_plus_estimands+estimator1+estimator2
+diagtwo <- diagnose_design(designtotal, sims=1000)
+diagtwo
+@
+
+
+<<additional, echo=FALSE,results='hide',error=FALSE, warning=FALSE, message=FALSE>>=
+#declare additional estimators to see if changes makes any differences for the value of power and coverage.
+estimator3 <- declare_estimator(time~political_inst,
+                                model=lm,
+                                term=c('political_inst'),
+                                estimand=c('political_inst'),
+                               label="lm")
+estimator4 <- declare_estimator(time~political_inst,
+                                model=lm_robust,
+                                term=c('political_inst'),
+                                estimand=c('political_inst'),
+                               label="lm_robust")
+#then, perform the dignose test for the additional estimators.
+designtotal2 <- design1_plus_estimands+estimator3+estimator4
+diagthree <- diagnose_design(designtotal, sims=1000)
+diagthree
+@
+
+
+<<recall, echo=FALSE,results='hide',error=FALSE, warning=FALSE, message=FALSE>>=
+diagtwo
+@
+
+
+
+<<result1, echo=FALSE, results='hide', warning=FALSE, message=FALSE >>=
+#simulate and show the result of Z-test statistic. 
+design_full<-design1_plus_estimands+estimator1+estimator2
+sim <- simulate_design(design_full, sims=1000)
+mean(sim$statistic[sim$estimator_label == "canned_lm"])
+mean(sim$estimate[sim$estimator_label == "canned_lm"])
+mean(sim$p.value[sim$estimator_label == "canned_lm"])
+mean(sim$std.error[sim$estimator_label == "canned_lm"])
+mean(sim$statistic[sim$estimator_label == "lm_robust"])
+mean(sim$estimate[sim$estimator_label == "lm_robust"])
+mean(sim$p.value[sim$estimator_label == "lm_robust"])
+mean(sim$std.error[sim$estimator_label == "lm_robust"])
+library(dbplyr)
+summary_df <- sim %>%
+  group_by(estimator_label) %>%
+  summarise(`Estimate_mean` = mean(estimate),
+            `Estimand_mean` = mean(estimand)) %>%
+  gather(key, value, `Estimate_mean`, `Estimand_mean`)
+@
+
+
+
+<<subset, echo=FALSE, results='hide', warning=FALSE, message=FALSE >>=
+#make a subset data to plot
+newdata<-subset(sim, estimator_label=="canned_lm", select=c(statistic))
+newdata2<-subset(sim, estimator_label=="lm_robust", select=c(statistic))
+@
+
+<<ztest, echo=FALSE, results='asis', warning=FALSE, message=FALSE >>=
+#plot the distribution of Z-test statistic of estimator 1 and estimator 2.
+par(mfrow=c(2,2))
+plot(density(newdata$statistic), main="", xlab="Z Statistic, Estimator 1")
+abline(v=mean(newdata$statistic), col="red")
+legend("topright", c("Mean of Test Statistic"), lty=1, col="red", cex=0.75)
+plot(density(newdata2$statistic), main="", xlab="Z Statistic, Estimator 2")
+abline(v=mean(newdata2$statistic), col="red")
+legend("topright", c("Mean of Test Statistic"), lty=1, col="red", cex=0.75)
+@
+
+
+<<regression, echo=FALSE, results='hide', warning=FALSE, message=FALSE >>=
+library(stargazer)
+#stargazer(reg1, reg2)
+@
+
+
+
